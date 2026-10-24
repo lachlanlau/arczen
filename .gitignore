@@ -1,0 +1,5 @@
+.DS_Store
+arc-passwords.csv
+/arczen.egg-info/
+/.venv/
+/arczen/__pycache__/

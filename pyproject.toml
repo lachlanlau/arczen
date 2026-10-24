@@ -1,0 +1,22 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arczen"
+version = "1.0.0"
+description = "Complete Arc Browser to Zen Browser migration: spaces, folders, pinned tabs, Essentials, icons, themes, containers, history and passwords."
+requires-python = ">=3.10"
+dependencies = ["lz4>=4.0"]
+
+[project.optional-dependencies]
+passwords = ["cryptography>=41"]
+process-check = ["psutil>=5.9"]
+all = ["cryptography>=41", "psutil>=5.9"]
+
+[project.scripts]
+arczen = "arczen.cli:main"
+
+[tool.setuptools]
+packages = ["arczen"]
