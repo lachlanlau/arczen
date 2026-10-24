@@ -3,7 +3,7 @@
 <table align="center">
   <tr>
     <td align="center">
-      <img src="Yimages/arc.png" width="300px" alt="Arc Browser"/><br/>
+      <img src="images/arc.png" width="300px" alt="Arc Browser"/><br/>
       <b>Arc.. to</b>
     </td>
     <td align="center">
