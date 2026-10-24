@@ -1,5 +1,5 @@
 # arczen/__init__.py
-"""Ultimate Arc to Zen migration package."""
+"""Arc to Zen migration tool."""
 
 __all__ = ["__version__"]
 

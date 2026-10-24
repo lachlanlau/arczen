@@ -103,7 +103,6 @@ Options within `replace` or `merge`:
 - Cookie copying (so that all your apps are signed in) has not been implemented.
 - If you close a tab in a split view before opening it for the first time after migration the split view may break, requiring you to unsplit the tabs then add them to a split view again.
 - As vertical split views are not supported in Zen, they are imported as normal split views.
-- Split views in folders are not currently imported (will be fixed soon).
 - Some Space icons may be mapped incorrectly.
 
 # Contributions

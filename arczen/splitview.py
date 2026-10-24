@@ -9,10 +9,15 @@ session["tabs"] and point at the group through "groupId"; the geometry lives in
 session["splitViewData"], keyed on the same group id and referring to tabs by
 their "zenSyncId".
 
-Because a pinned tab already uses "groupId" to say which folder it is in, a
-split inside a folder cannot express that on its tabs. Zen instead adds a
-session["folders"] entry for the split group carrying "parentId". A split
-directly under the pinned row, or any unpinned split, has no folder entry.
+Because a pinned tab uses "groupId" to say which folder it is in, a split
+inside a folder cannot express that on its tabs; the split takes the field over.
+Zen instead adds a session["folders"] entry for the split group carrying
+"parentId". The parent is therefore resolved from Arc's folder path, never from
+the members' "groupId", which the split is about to overwrite.
+
+A pinned folder whose only content is a split keeps a placeholder empty tab, and
+the split group's "prevSiblingInfo" anchors to it. Without that placeholder the
+folder has no direct tab left and is dropped along with the split.
 
 No "maxSplitViewId" key appears in any dump, so none is written.
 """
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +40,8 @@ GROUP_COLORS = ("blue", "purple", "cyan", "orange", "yellow", "pink", "green", "
 GRID_TYPE = "vsep"
 SPLIT_DIRECTION = "row"
 
+EMPTY_TAB_URL = "about:blank"
+
 
 @dataclass
 class SplitReport:
@@ -44,7 +52,7 @@ class SplitReport:
 
 
 # --------------------------------------------------------------------------
-# Helpers
+# Small helpers
 # --------------------------------------------------------------------------
 
 def _tab_url(tab: dict[str, Any]) -> str:
@@ -89,6 +97,121 @@ def _sizes(members: list[Any]) -> list[int]:
     return sizes
 
 
+# --------------------------------------------------------------------------
+# Folder resolution
+# --------------------------------------------------------------------------
+
+def _folder_path(folder: dict[str, Any], folders_by_id: dict[str, dict[str, Any]]) -> tuple[str, ...]:
+    """Name chain of a Zen folder, outermost first.
+
+    Split groups also live in the folders array; they are skipped because they
+    are not part of any user-visible folder path.
+    """
+    names: list[str] = []
+    current: dict[str, Any] | None = folder
+    seen: set[int] = set()
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        if current.get("splitViewGroup"):
+            return ()
+        names.append(str(current.get("name") or ""))
+        parent_id = current.get("parentId")
+        current = folders_by_id.get(str(parent_id)) if parent_id else None
+    names.reverse()
+    return tuple(names)
+
+
+def _resolve_parent_folder(
+    folders: list[dict[str, Any]],
+    folders_by_id: dict[str, dict[str, Any]],
+    workspace: str | None,
+    arc_path: tuple[str, ...],
+) -> dict[str, Any] | None:
+    """The Zen folder matching Arc's folder path for this split.
+
+    Matching on the name chain rather than the members' "groupId" is deliberate:
+    the split overwrites that field, and a folder whose only content is a split
+    may never have set it on its tabs in the first place.
+    """
+    if not arc_path:
+        return None
+    for folder in folders:
+        if folder.get("splitViewGroup"):
+            continue
+        if workspace is not None and folder.get("workspaceId") not in (None, workspace):
+            continue
+        if _folder_path(folder, folders_by_id) == arc_path:
+            return folder
+    return None
+
+
+def _ensure_placeholder(
+    tabs: list[dict[str, Any]],
+    folder: dict[str, Any],
+    template: dict[str, Any],
+    workspace: str | None,
+) -> str | None:
+    """Guarantee the folder still has a direct tab to anchor it.
+
+    Returns the placeholder's id, or None if the folder already holds a direct
+    tab of its own and needs no placeholder.
+    """
+    folder_id = str(folder.get("id"))
+
+    existing = folder.get("emptyTabIds") or []
+    if existing:
+        return str(existing[0])
+
+    for tab in tabs:
+        if str(tab.get("groupId") or "") == folder_id and not tab.get("zenIsEmpty"):
+            return None
+
+    placeholder_id = f"{int(time.time() * 1000)}-{uuid.uuid4()}"
+    placeholder = {
+        "entries": [{
+            "url": EMPTY_TAB_URL,
+            "triggeringPrincipal_base64": "{\"0\":{\"0\":\"moz-nullprincipal:{%s}\"}}" % uuid.uuid4(),
+        }],
+        "lastAccessed": template.get("lastAccessed", 0),
+        "pinned": True,
+        "hidden": False,
+        "groupId": folder_id,
+        "zenWorkspace": workspace,
+        "zenSyncId": placeholder_id,
+        "zenEssential": False,
+        "zenDefaultUserContextId": None,
+        "zenPinnedIcon": None,
+        "zenIsEmpty": True,
+        "zenHasStaticIcon": False,
+        "zenGlanceId": None,
+        "zenIsGlance": False,
+        "_zenPinnedInitialState": {"entry": {"url": EMPTY_TAB_URL}, "image": None},
+        "zenLiveFolderItemId": None,
+        "searchMode": None,
+        "userContextId": template.get("userContextId", 0),
+        "attributes": {},
+        "index": 1,
+        "userTypedValue": "",
+        "userTypedClear": 0,
+        "image": None,
+    }
+
+    # Immediately before the panes, so the folder opens on the placeholder.
+    try:
+        position = tabs.index(template)
+    except ValueError:
+        position = len(tabs)
+    tabs.insert(position, placeholder)
+
+    folder["emptyTabIds"] = [placeholder_id]
+    logger.info("Folder %s held only a split; added placeholder tab", folder_id)
+    return placeholder_id
+
+
+# --------------------------------------------------------------------------
+# Member location
+# --------------------------------------------------------------------------
+
 def _find_run(
     tabs: list[dict[str, Any]],
     urls: list[str],
@@ -99,8 +222,8 @@ def _find_run(
     """Locate the already-written member tabs of one split.
 
     Arc emits a split's children consecutively, so the panes arrive in the tab
-    list as an unbroken run with matching URLs, pin state, workspace and folder.
-    A run that cannot be identified is left alone rather than guessed at.
+    list as an unbroken run with matching URLs, pin state and workspace. A run
+    that cannot be identified is left alone rather than guessed at.
     """
     width = len(urls)
     for start in range(len(tabs) - width + 1):
@@ -180,8 +303,17 @@ def apply_split_views(session: dict[str, Any], sidebar: Any, options: Any) -> Sp
                 continue
 
             workspace = window[0].get("zenWorkspace")
-            parent_id = str(window[0].get("groupId") or "") or None
-            parent = folders_by_id.get(parent_id) if parent_id else None
+
+            # Resolve the folder before the members' groupId is overwritten.
+            parent = None
+            if split.pinned and split.folder_path:
+                parent = _resolve_parent_folder(folders, folders_by_id, workspace, split.folder_path)
+                if parent is None:
+                    logger.warning(
+                        "Split %s: no Zen folder matches Arc path %s; placing it at the top level",
+                        split.item_id[:8],
+                        " / ".join(split.folder_path),
+                    )
 
             counter, group_id = _next_id(base, counter, taken_ids)
 
@@ -219,40 +351,44 @@ def apply_split_views(session: dict[str, Any], sidebar: Any, options: Any) -> Sp
 
             # Only a nested split needs a folder entry; that entry is the sole
             # place the parent folder can be recorded.
-            if split.pinned and parent is not None:
-                empty_ids = parent.get("emptyTabIds") or []
+            if parent is not None:
+                placeholder_id = _ensure_placeholder(tabs, parent, window[0], workspace)
                 previous = (
-                    {"type": "tab", "id": empty_ids[0]}
-                    if empty_ids
+                    {"type": "tab", "id": placeholder_id}
+                    if placeholder_id
                     else {"type": "start", "id": None}
                 )
-                folders.append({
+                entry = {
                     "pinned": True,
                     "splitViewGroup": True,
                     "id": group_id,
                     "name": "",
                     "collapsed": False,
                     "saveOnWindowClose": True,
-                    "parentId": parent_id,
+                    "parentId": str(parent.get("id")),
                     "prevSiblingInfo": previous,
                     "emptyTabIds": [],
                     "workspaceId": workspace,
-                })
+                }
+                folders.append(entry)
+                folders_by_id[group_id] = entry
 
             note = ""
             if split.orientation != "horizontal":
                 note = f" (Arc's {split.orientation} layout became side by side)"
             if len(split.members) > 2:
                 note += " (3+ panes: layout untested)"
+            if split.folder_path and parent is None:
+                note += " (not placed in its folder)"
             report.written.append(label + note)
 
             logger.info(
-                "Split %s -> Zen group %s (%s, %d pane(s), parent folder %s)",
+                "Split %s -> Zen group %s (%s, %d pane(s), folder %s)",
                 split.item_id[:8],
                 group_id,
                 "pinned" if split.pinned else "open",
                 len(member_ids),
-                parent_id or "none",
+                " / ".join(split.folder_path) or "none",
             )
 
     return report
