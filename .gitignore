@@ -3,3 +3,4 @@ arc-passwords.csv
 /arczen.egg-info/
 /.venv/
 /arczen/__pycache__/
+project-snapshot.md
